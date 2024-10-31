@@ -70,12 +70,12 @@ If needed, update the [`docker-compose.yaml`](https://github.com/jhj0517/Whisper
 - ## Run Locally
 
 ### Prerequisite
-To run this WebUI, you need to have `git`, `python` version 3.8 ~ 3.10, `FFmpeg`. <br>
+To run this WebUI, you need to have `git`, `3.10 <= python <= 3.12`, `FFmpeg`. <br>
 And if you're not using an Nvida GPU, or using a different `CUDA` version than 12.4,  edit the [`requirements.txt`](https://github.com/jhj0517/Whisper-WebUI/blob/master/requirements.txt) to match your environment.
 
 Please follow the links below to install the necessary software:
 - git : [https://git-scm.com/downloads](https://git-scm.com/downloads)
-- python : [https://www.python.org/downloads/](https://www.python.org/downloads/) **( If your python version is too new, torch will not install properly.)**
+- python : [https://www.python.org/downloads/](https://www.python.org/downloads/) **`3.10 ~ 3.12` is recommended.** 
 - FFmpeg :  [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 - CUDA : [https://developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads)
 
@@ -128,3 +128,6 @@ This is Whisper's original VRAM usage table for models.
 - [x] Add background music separation pre-processing with [UVR](https://github.com/Anjok07/ultimatevocalremovergui)  
 - [ ] Add fast api script
 - [ ] Support real-time transcription for microphone
+
+### Translation 🌐
+Any PRs translating Japanese, Spanish, French, German, Chinese, or any other language into [translation.yaml](https://github.com/jhj0517/Whisper-WebUI/blob/master/configs/translation.yaml) would be greatly appreciated!
