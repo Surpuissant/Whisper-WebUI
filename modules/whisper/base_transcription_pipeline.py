@@ -1,6 +1,4 @@
 import os
-import torch
-import ast
 import whisper
 import ctranslate2
 import gradio as gr
@@ -10,15 +8,14 @@ from typing import BinaryIO, Union, Tuple, List
 import numpy as np
 from datetime import datetime
 from faster_whisper.vad import VadOptions
-from dataclasses import astuple
 
 from modules.uvr.music_separator import MusicSeparator
 from modules.utils.paths import (WHISPER_MODELS_DIR, DIARIZATION_MODELS_DIR, OUTPUT_DIR, DEFAULT_PARAMETERS_CONFIG_PATH,
                                  UVR_MODELS_DIR)
 from modules.utils.constants import *
-from modules.utils.subtitle_manager import get_srt, get_vtt, get_txt, write_file, safe_filename
+from modules.utils.subtitle_manager import *
 from modules.utils.youtube_manager import get_ytdata, get_ytaudio
-from modules.utils.files_manager import get_media_files, format_gradio_files, load_yaml, save_yaml
+from modules.utils.files_manager import get_media_files, format_gradio_files, load_yaml, save_yaml, read_file
 from modules.whisper.data_classes import *
 from modules.diarize.diarizer import Diarizer
 from modules.vad.silero_vad import SileroVAD
@@ -74,9 +71,10 @@ class BaseTranscriptionPipeline(ABC):
     def run(self,
             audio: Union[str, BinaryIO, np.ndarray],
             progress: gr.Progress = gr.Progress(),
+            file_format: str = "SRT",
             add_timestamp: bool = True,
             *pipeline_params,
-            ) -> Tuple[List[dict], float]:
+            ) -> Tuple[List[Segment], float]:
         """
         Run transcription with conditional pre-processing and post-processing.
         The VAD will be performed to remove noise from the audio input in pre-processing, if enabled.
@@ -89,15 +87,19 @@ class BaseTranscriptionPipeline(ABC):
             Audio input. This can be file path or binary type.
         progress: gr.Progress
             Indicator to show progress directly in gradio.
+        file_format: str
+            Subtitle file format between ["SRT", "WebVTT", "txt", "lrc"]
         add_timestamp: bool
             Whether to add a timestamp at the end of the filename.
         *pipeline_params: tuple
-            Parameters for the transcription pipeline. This will be dealt with "TranscriptionPipelineParams" data class
+            Parameters for the transcription pipeline. This will be dealt with "TranscriptionPipelineParams" data class.
+            This must be provided as a List with * wildcard because of the integration with gradio.
+            See more info at : https://github.com/gradio-app/gradio/issues/2471
 
         Returns
         ----------
-        segments_result: List[dict]
-            list of dicts that includes start, end timestamps and transcribed text
+        segments_result: List[Segment]
+            list of Segment that includes start, end timestamps and transcribed text
         elapsed_time: float
             elapsed time for running
         """
@@ -169,6 +171,7 @@ class BaseTranscriptionPipeline(ABC):
 
         self.cache_parameters(
             params=params,
+            file_format=file_format,
             add_timestamp=add_timestamp
         )
         return result, elapsed_time
@@ -179,8 +182,8 @@ class BaseTranscriptionPipeline(ABC):
                         file_format: str = "SRT",
                         add_timestamp: bool = True,
                         progress=gr.Progress(),
-                        *params,
-                        ) -> list:
+                        *pipeline_params,
+                        ) -> Tuple[str, List]:
         """
         Write subtitle file from Files
 
@@ -197,7 +200,7 @@ class BaseTranscriptionPipeline(ABC):
             Boolean value from gr.Checkbox() that determines whether to add a timestamp at the end of the subtitle filename.
         progress: gr.Progress
             Indicator to show progress directly in gradio.
-        *params: tuple
+        *pipeline_params: tuple
             Parameters for the transcription pipeline. This will be dealt with "TranscriptionPipelineParams" data class
 
         Returns
@@ -208,6 +211,11 @@ class BaseTranscriptionPipeline(ABC):
             Output file path to return to gr.Files()
         """
         try:
+            params = TranscriptionPipelineParams.from_list(list(pipeline_params))
+            writer_options = {
+                "highlight_words": True if params.whisper.word_timestamps else False
+            }
+
             if input_folder_path:
                 files = get_media_files(input_folder_path)
             if isinstance(files, str):
@@ -220,19 +228,21 @@ class BaseTranscriptionPipeline(ABC):
                 transcribed_segments, time_for_task = self.run(
                     file,
                     progress,
+                    file_format,
                     add_timestamp,
-                    *params,
+                    *pipeline_params,
                 )
 
                 file_name, file_ext = os.path.splitext(os.path.basename(file))
-                subtitle, file_path = self.generate_and_write_file(
-                    file_name=file_name,
-                    transcribed_segments=transcribed_segments,
+                subtitle, file_path = generate_file(
+                    output_dir=self.output_dir,
+                    output_file_name=file_name,
+                    output_format=file_format,
+                    result=transcribed_segments,
                     add_timestamp=add_timestamp,
-                    file_format=file_format,
-                    output_dir=self.output_dir
+                    **writer_options
                 )
-                files_info[file_name] = {"subtitle": subtitle, "time_for_task": time_for_task, "path": file_path}
+                files_info[file_name] = {"subtitle": read_file(file_path), "time_for_task": time_for_task, "path": file_path}
 
             total_result = ''
             total_time = 0
@@ -245,10 +255,11 @@ class BaseTranscriptionPipeline(ABC):
             result_str = f"Done in {self.format_time(total_time)}! Subtitle is in the outputs folder.\n\n{total_result}"
             result_file_path = [info['path'] for info in files_info.values()]
 
-            return [result_str, result_file_path]
+            return result_str, result_file_path
 
         except Exception as e:
             print(f"Error transcribing file: {e}")
+            raise
         finally:
             self.release_cuda_memory()
 
@@ -257,8 +268,8 @@ class BaseTranscriptionPipeline(ABC):
                        file_format: str = "SRT",
                        add_timestamp: bool = True,
                        progress=gr.Progress(),
-                       *whisper_params,
-                       ) -> list:
+                       *pipeline_params,
+                       ) -> Tuple[str, str]:
         """
         Write subtitle file from microphone
 
@@ -272,7 +283,7 @@ class BaseTranscriptionPipeline(ABC):
             Boolean value from gr.Checkbox() that determines whether to add a timestamp at the end of the filename.
         progress: gr.Progress
             Indicator to show progress directly in gradio.
-        *whisper_params: tuple
+        *pipeline_params: tuple
             Parameters related with whisper. This will be dealt with "WhisperParameters" data class
 
         Returns
@@ -283,27 +294,36 @@ class BaseTranscriptionPipeline(ABC):
             Output file path to return to gr.Files()
         """
         try:
+            params = TranscriptionPipelineParams.from_list(list(pipeline_params))
+            writer_options = {
+                "highlight_words": True if params.whisper.word_timestamps else False
+            }
+
             progress(0, desc="Loading Audio..")
             transcribed_segments, time_for_task = self.run(
                 mic_audio,
                 progress,
+                file_format,
                 add_timestamp,
-                *whisper_params,
+                *pipeline_params,
             )
             progress(1, desc="Completed!")
 
-            subtitle, result_file_path = self.generate_and_write_file(
-                file_name="Mic",
-                transcribed_segments=transcribed_segments,
+            file_name = "Mic"
+            subtitle, file_path = generate_file(
+                output_dir=self.output_dir,
+                output_file_name=file_name,
+                output_format=file_format,
+                result=transcribed_segments,
                 add_timestamp=add_timestamp,
-                file_format=file_format,
-                output_dir=self.output_dir
+                **writer_options
             )
 
             result_str = f"Done in {self.format_time(time_for_task)}! Subtitle file is in the outputs folder.\n\n{subtitle}"
-            return [result_str, result_file_path]
+            return result_str, file_path
         except Exception as e:
-            print(f"Error transcribing file: {e}")
+            print(f"Error transcribing mic: {e}")
+            raise
         finally:
             self.release_cuda_memory()
 
@@ -312,8 +332,8 @@ class BaseTranscriptionPipeline(ABC):
                            file_format: str = "SRT",
                            add_timestamp: bool = True,
                            progress=gr.Progress(),
-                           *whisper_params,
-                           ) -> list:
+                           *pipeline_params,
+                           ) -> Tuple[str, str]:
         """
         Write subtitle file from Youtube
 
@@ -327,7 +347,7 @@ class BaseTranscriptionPipeline(ABC):
             Boolean value from gr.Checkbox() that determines whether to add a timestamp at the end of the filename.
         progress: gr.Progress
             Indicator to show progress directly in gradio.
-        *whisper_params: tuple
+        *pipeline_params: tuple
             Parameters related with whisper. This will be dealt with "WhisperParameters" data class
 
         Returns
@@ -338,6 +358,11 @@ class BaseTranscriptionPipeline(ABC):
             Output file path to return to gr.Files()
         """
         try:
+            params = TranscriptionPipelineParams.from_list(list(pipeline_params))
+            writer_options = {
+                "highlight_words": True if params.whisper.word_timestamps else False
+            }
+
             progress(0, desc="Loading Audio from Youtube..")
             yt = get_ytdata(youtube_link)
             audio = get_ytaudio(yt)
@@ -345,29 +370,33 @@ class BaseTranscriptionPipeline(ABC):
             transcribed_segments, time_for_task = self.run(
                 audio,
                 progress,
+                file_format,
                 add_timestamp,
-                *whisper_params,
+                *pipeline_params,
             )
 
             progress(1, desc="Completed!")
 
             file_name = safe_filename(yt.title)
-            subtitle, result_file_path = self.generate_and_write_file(
-                file_name=file_name,
-                transcribed_segments=transcribed_segments,
+            subtitle, file_path = generate_file(
+                output_dir=self.output_dir,
+                output_file_name=file_name,
+                output_format=file_format,
+                result=transcribed_segments,
                 add_timestamp=add_timestamp,
-                file_format=file_format,
-                output_dir=self.output_dir
+                **writer_options
             )
+
             result_str = f"Done in {self.format_time(time_for_task)}! Subtitle file is in the outputs folder.\n\n{subtitle}"
 
             if os.path.exists(audio):
                 os.remove(audio)
 
-            return [result_str, result_file_path]
+            return result_str, file_path
 
         except Exception as e:
-            print(f"Error transcribing file: {e}")
+            print(f"Error transcribing youtube: {e}")
+            raise
         finally:
             self.release_cuda_memory()
 
@@ -384,58 +413,6 @@ class BaseTranscriptionPipeline(ABC):
             return list(ctranslate2.get_supported_compute_types("cuda"))
         else:
             return list(ctranslate2.get_supported_compute_types("cpu"))
-
-    @staticmethod
-    def generate_and_write_file(file_name: str,
-                                transcribed_segments: list,
-                                add_timestamp: bool,
-                                file_format: str,
-                                output_dir: str
-                                ) -> str:
-        """
-        Writes subtitle file
-
-        Parameters
-        ----------
-        file_name: str
-            Output file name
-        transcribed_segments: list
-            Text segments transcribed from audio
-        add_timestamp: bool
-            Determines whether to add a timestamp to the end of the filename.
-        file_format: str
-            File format to write. Supported formats: [SRT, WebVTT, txt]
-        output_dir: str
-            Directory path of the output
-
-        Returns
-        ----------
-        content: str
-            Result of the transcription
-        output_path: str
-            output file path
-        """
-        if add_timestamp:
-            timestamp = datetime.now().strftime("%m%d%H%M%S")
-            output_path = os.path.join(output_dir, f"{file_name}-{timestamp}")
-        else:
-            output_path = os.path.join(output_dir, f"{file_name}")
-
-        file_format = file_format.strip().lower()
-        if file_format == "srt":
-            content = get_srt(transcribed_segments)
-            output_path += '.srt'
-
-        elif file_format == "webvtt":
-            content = get_vtt(transcribed_segments)
-            output_path += '.vtt'
-
-        elif file_format == "txt":
-            content = get_txt(transcribed_segments)
-            output_path += '.txt'
-
-        write_file(content, output_path)
-        return content, output_path
 
     @staticmethod
     def format_time(elapsed_time: float) -> str:
@@ -522,7 +499,7 @@ class BaseTranscriptionPipeline(ABC):
             params.whisper.lang = None
         else:
             language_code_dict = {value: key for key, value in whisper.tokenizer.LANGUAGES.items()}
-            params.whisper.lang = language_code_dict[params.lang]
+            params.whisper.lang = language_code_dict[params.whisper.lang]
 
         if params.whisper.initial_prompt == GRADIO_NONE_STR:
             params.whisper.initial_prompt = None
@@ -543,7 +520,8 @@ class BaseTranscriptionPipeline(ABC):
     @staticmethod
     def cache_parameters(
         params: TranscriptionPipelineParams,
-        add_timestamp: bool
+        file_format: str = "SRT",
+        add_timestamp: bool = True
     ):
         """Cache parameters to the yaml file"""
         cached_params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
@@ -551,6 +529,7 @@ class BaseTranscriptionPipeline(ABC):
 
         cached_yaml = {**cached_params, **param_to_cache}
         cached_yaml["whisper"]["add_timestamp"] = add_timestamp
+        cached_yaml["whisper"]["file_format"] = file_format
 
         supress_token = cached_yaml["whisper"].get("suppress_tokens", None)
         if supress_token and isinstance(supress_token, list):
@@ -558,6 +537,9 @@ class BaseTranscriptionPipeline(ABC):
 
         if cached_yaml["whisper"].get("lang", None) is None:
             cached_yaml["whisper"]["lang"] = AUTOMATIC_DETECTION.unwrap()
+        else:
+            language_dict = whisper.tokenizer.LANGUAGES
+            cached_yaml["whisper"]["lang"] = language_dict[cached_yaml["whisper"]["lang"]]
 
         if cached_yaml["vad"].get("max_speech_duration_s", float('inf')) == float('inf'):
             cached_yaml["vad"]["max_speech_duration_s"] = GRADIO_NONE_NUMBER_MAX

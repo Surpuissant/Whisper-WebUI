@@ -7,6 +7,7 @@ from pyannote.audio import Pipeline
 from typing import Optional, Union
 import torch
 
+from modules.whisper.data_classes import *
 from modules.utils.paths import DIARIZATION_MODELS_DIR
 from modules.diarize.audio_loader import load_audio, SAMPLE_RATE
 
@@ -43,8 +44,9 @@ class DiarizationPipeline:
 
 def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
     transcript_segments = transcript_result["segments"]
+    if transcript_segments and isinstance(transcript_segments[0], Segment):
+        transcript_segments = [seg.model_dump() for seg in transcript_segments]
     for seg in transcript_segments:
-        seg = seg.dict()
         # assign speaker to segment (if any)
         diarize_df['intersection'] = np.minimum(diarize_df['end'], seg['end']) - np.maximum(diarize_df['start'],
                                                                                             seg['start'])
@@ -64,7 +66,7 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
             seg["speaker"] = speaker
 
         # assign speaker to words
-        if 'words' in seg:
+        if 'words' in seg and seg['words'] is not None:
             for word in seg['words']:
                 if 'start' in word:
                     diarize_df['intersection'] = np.minimum(diarize_df['end'], word['end']) - np.maximum(
@@ -86,10 +88,10 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
                     if word_speaker is not None:
                         word["speaker"] = word_speaker
 
-    return transcript_result
+    return {"segments": transcript_segments}
 
 
-class Segment:
+class DiarizationSegment:
     def __init__(self, start, end, speaker=None):
         self.start = start
         self.end = end
