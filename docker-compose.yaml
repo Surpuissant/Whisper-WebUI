@@ -20,10 +20,10 @@ services:
 
     # If you're not using nvidia GPU, Update device to match yours.
     # See more info at : https://docs.docker.com/compose/compose-file/deploy/#driver
-    #deploy:
-    #  resources:
-    #    reservations:
-    #      devices:
-    #        - driver: nvidia
-    #          count: all
-    #          capabilities: [ gpu ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
