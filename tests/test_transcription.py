@@ -24,10 +24,7 @@ def test_transcribe(
     bgm_separation: bool,
     diarization: bool,
 ):
-    audio_path_dir = os.path.join(WEBUI_DIR, "tests")
-    audio_path = os.path.join(audio_path_dir, "jfk.wav")
-    if not os.path.exists(audio_path):
-        download_file(TEST_FILE_DOWNLOAD_URL, audio_path_dir)
+    audio_path = TEST_FILE_PATH
 
     answer = TEST_ANSWER
     if diarization:
@@ -62,6 +59,8 @@ def test_transcribe(
     subtitle_str, file_paths = whisper_inferencer.transcribe_file(
         [audio_path],
         None,
+        None,
+        None,
         "SRT",
         False,
         gr.Progress(),
@@ -89,22 +88,7 @@ def test_transcribe(
         *hparams,
     )
     subtitle = read_file(file_path).split("\n")
-    assert calculate_wer(answer, subtitle[2].strip().replace(",", "").replace(".", "")) < 0.1
+    wer = calculate_wer(answer, subtitle[2].strip().replace(",", "").replace(".", ""))
+    assert wer < 0.1, f"WER is too high, it's {wer}"
 
 
-def download_file(url, save_dir):
-    if os.path.exists(TEST_FILE_PATH):
-        return
-
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    file_name = url.split("/")[-1]
-    file_path = os.path.join(save_dir, file_name)
-
-    response = requests.get(url)
-
-    with open(file_path, "wb") as file:
-        file.write(response.content)
-
-    print(f"File downloaded to: {file_path}")

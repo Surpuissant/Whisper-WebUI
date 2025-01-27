@@ -8,17 +8,25 @@ from typing import BinaryIO, Union, Tuple, List
 import numpy as np
 from datetime import datetime
 from faster_whisper.vad import VadOptions
+import gc
+from copy import deepcopy
+import time
 
 from modules.uvr.music_separator import MusicSeparator
 from modules.utils.paths import (WHISPER_MODELS_DIR, DIARIZATION_MODELS_DIR, OUTPUT_DIR, DEFAULT_PARAMETERS_CONFIG_PATH,
                                  UVR_MODELS_DIR)
 from modules.utils.constants import *
+from modules.utils.logger import get_logger
 from modules.utils.subtitle_manager import *
 from modules.utils.youtube_manager import get_ytdata, get_ytaudio
 from modules.utils.files_manager import get_media_files, format_gradio_files, load_yaml, save_yaml, read_file
+from modules.utils.audio_manager import validate_audio
 from modules.whisper.data_classes import *
 from modules.diarize.diarizer import Diarizer
 from modules.vad.silero_vad import SileroVAD
+
+
+logger = get_logger()
 
 
 class BaseTranscriptionPipeline(ABC):
@@ -45,7 +53,6 @@ class BaseTranscriptionPipeline(ABC):
         self.current_model_size = None
         self.available_models = whisper.available_models()
         self.available_langs = sorted(list(whisper.tokenizer.LANGUAGES.values()))
-        self.translatable_models = ["large", "large-v1", "large-v2", "large-v3"]
         self.device = self.get_device()
         self.available_compute_types = self.get_available_compute_type()
         self.current_compute_type = self.get_compute_type()
@@ -103,6 +110,11 @@ class BaseTranscriptionPipeline(ABC):
         elapsed_time: float
             elapsed time for running
         """
+        start_time = time.time()
+
+        if not validate_audio(audio):
+            return [Segment()], 0
+
         params = TranscriptionPipelineParams.from_list(list(pipeline_params))
         params = self.validate_gradio_values(params)
         bgm_params, vad_params, whisper_params, diarization_params = params.bgm_separation, params.vad, params.whisper, params.diarization
@@ -110,8 +122,8 @@ class BaseTranscriptionPipeline(ABC):
         if bgm_params.is_separate_bgm:
             music, audio, _ = self.music_separator.separate(
                 audio=audio,
-                model_name=bgm_params.model_size,
-                device=bgm_params.device,
+                model_name=bgm_params.uvr_model_size,
+                device=bgm_params.uvr_device,
                 segment_size=bgm_params.segment_size,
                 save_file=bgm_params.save_file,
                 progress=progress
@@ -127,8 +139,12 @@ class BaseTranscriptionPipeline(ABC):
 
             if bgm_params.enable_offload:
                 self.music_separator.offload()
+            elapsed_time_bgm_sep = time.time() - start_time
+
+        origin_audio = deepcopy(audio)
 
         if vad_params.vad_filter:
+            progress(0, desc="Filtering silent parts from audio..")
             vad_options = VadOptions(
                 threshold=vad_params.threshold,
                 min_speech_duration_ms=vad_params.min_speech_duration_ms,
@@ -148,37 +164,50 @@ class BaseTranscriptionPipeline(ABC):
             else:
                 vad_params.vad_filter = False
 
-        result, elapsed_time = self.transcribe(
+        result, elapsed_time_transcription = self.transcribe(
             audio,
             progress,
             *whisper_params.to_list()
         )
 
         if vad_params.vad_filter:
-            result = self.vad.restore_speech_timestamps(
+            restored_result = self.vad.restore_speech_timestamps(
                 segments=result,
                 speech_chunks=speech_chunks,
             )
+            if restored_result:
+                result = restored_result
+            else:
+                logger.info("VAD detected no speech segments in the audio.")
 
         if diarization_params.is_diarize:
+            progress(0.99, desc="Diarizing speakers..")
             result, elapsed_time_diarization = self.diarizer.run(
-                audio=audio,
-                use_auth_token=diarization_params.hf_token,
+                audio=origin_audio,
+                use_auth_token=diarization_params.hf_token if diarization_params.hf_token else os.environ.get("HF_TOKEN"),
                 transcribed_result=result,
-                device=diarization_params.device
+                device=diarization_params.diarization_device
             )
-            elapsed_time += elapsed_time_diarization
 
         self.cache_parameters(
             params=params,
             file_format=file_format,
             add_timestamp=add_timestamp
         )
-        return result, elapsed_time
+
+        if not result:
+            logger.info(f"Whisper did not detected any speech segments in the audio.")
+            result = [Segment()]
+
+        progress(1.0, desc="Finished.")
+        total_elapsed_time = time.time() - start_time
+        return result, total_elapsed_time
 
     def transcribe_file(self,
                         files: Optional[List] = None,
                         input_folder_path: Optional[str] = None,
+                        include_subdirectory: Optional[str] = None,
+                        save_same_dir: Optional[str] = None,
                         file_format: str = "SRT",
                         add_timestamp: bool = True,
                         progress=gr.Progress(),
@@ -191,9 +220,15 @@ class BaseTranscriptionPipeline(ABC):
         ----------
         files: list
             List of files to transcribe from gr.Files()
-        input_folder_path: str
+        input_folder_path: Optional[str]
             Input folder path to transcribe from gr.Textbox(). If this is provided, `files` will be ignored and
             this will be used instead.
+        include_subdirectory: Optional[str]
+            When using `input_folder_path`, whether to include all files in the subdirectory or not
+        save_same_dir: Optional[str]
+            When using `input_folder_path`, whether to save output in the same directory as inputs or not, in addition
+            to the original output directory. This feature is only available when using `input_folder_path`, because
+            gradio only allows to use cached file path in the function yet.
         file_format: str
             Subtitle File format to write from gr.Dropdown(). Supported format: [SRT, WebVTT, txt]
         add_timestamp: bool
@@ -217,7 +252,7 @@ class BaseTranscriptionPipeline(ABC):
             }
 
             if input_folder_path:
-                files = get_media_files(input_folder_path)
+                files = get_media_files(input_folder_path, include_sub_directory=include_subdirectory)
             if isinstance(files, str):
                 files = [files]
             if files and isinstance(files[0], gr.utils.NamedString):
@@ -234,6 +269,17 @@ class BaseTranscriptionPipeline(ABC):
                 )
 
                 file_name, file_ext = os.path.splitext(os.path.basename(file))
+                if save_same_dir and input_folder_path:
+                    output_dir = os.path.dirname(file)
+                    subtitle, file_path = generate_file(
+                        output_dir=output_dir,
+                        output_file_name=file_name,
+                        output_format=file_format,
+                        result=transcribed_segments,
+                        add_timestamp=add_timestamp,
+                        **writer_options
+                    )
+
                 subtitle, file_path = generate_file(
                     output_dir=self.output_dir,
                     output_file_name=file_name,
@@ -258,8 +304,7 @@ class BaseTranscriptionPipeline(ABC):
             return result_str, result_file_path
 
         except Exception as e:
-            print(f"Error transcribing file: {e}")
-            raise
+            raise RuntimeError(f"Error transcribing file: {e}") from e
         finally:
             self.release_cuda_memory()
 
@@ -322,8 +367,7 @@ class BaseTranscriptionPipeline(ABC):
             result_str = f"Done in {self.format_time(time_for_task)}! Subtitle file is in the outputs folder.\n\n{subtitle}"
             return result_str, file_path
         except Exception as e:
-            print(f"Error transcribing mic: {e}")
-            raise
+            raise RuntimeError(f"Error transcribing mic: {e}") from e
         finally:
             self.release_cuda_memory()
 
@@ -395,8 +439,7 @@ class BaseTranscriptionPipeline(ABC):
             return result_str, file_path
 
         except Exception as e:
-            print(f"Error transcribing youtube: {e}")
-            raise
+            raise RuntimeError(f"Error transcribing youtube: {e}") from e
         finally:
             self.release_cuda_memory()
 
@@ -413,6 +456,15 @@ class BaseTranscriptionPipeline(ABC):
             return list(ctranslate2.get_supported_compute_types("cuda"))
         else:
             return list(ctranslate2.get_supported_compute_types("cpu"))
+
+    def offload(self):
+        """Offload the model and free up the memory"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.device == "cuda":
+            self.release_cuda_memory()
+        gc.collect()
 
     @staticmethod
     def format_time(elapsed_time: float) -> str:

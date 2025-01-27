@@ -15,7 +15,8 @@ from .files_manager import read_file
 def format_timestamp(
     seconds: float, always_include_hours: bool = True, decimal_marker: str = ","
 ) -> str:
-    assert seconds >= 0, "non-negative timestamp expected"
+    assert seconds is not None and seconds >= 0, "Wrong timestamp provided"
+
     milliseconds = round(seconds * 1000.0)
 
     hours = milliseconds // 3_600_000
@@ -91,6 +92,9 @@ class ResultWriter:
     ):
         raise NotImplementedError
 
+    def to_segments(self, file_path: str):
+        raise NotImplementedError
+
 
 class WriteTXT(ResultWriter):
     extension: str = "txt"
@@ -100,6 +104,19 @@ class WriteTXT(ResultWriter):
     ):
         for segment in result["segments"]:
             print(segment["text"].strip(), file=file, flush=True)
+
+    def to_segments(self, file_path: str):
+        segments = []
+
+        blocks = read_file(file_path).split('\n')
+
+        for block in blocks:
+            segments.append(Segment(
+                start=None,
+                end=None,
+                text=block
+            ))
+        return segments
 
 
 class SubtitlesWriter(ResultWriter):
@@ -216,6 +233,9 @@ class SubtitlesWriter(ResultWriter):
                     yield subtitle_start, subtitle_end, subtitle_text
         else:
             for segment in result["segments"]:
+                if segment["text"] is None:
+                    continue
+
                 segment_start = self.format_timestamp(segment["start"])
                 segment_end = self.format_timestamp(segment["end"])
                 segment_text = segment["text"].strip().replace("-->", "->")
@@ -424,13 +444,14 @@ def generate_file(
 
 def safe_filename(name):
     INVALID_FILENAME_CHARS = r'[<>:"/\\|?*\x00-\x1f]'
+    MAX_FILENAME_LENGTH = 200
     safe_name = re.sub(INVALID_FILENAME_CHARS, '_', name)
-    # Truncate the filename if it exceeds the max_length (20)
-    if len(safe_name) > 20:
+    # Truncate the filename if it exceeds the max_length (MAX_FILENAME_LENGTH)
+    if len(safe_name) > MAX_FILENAME_LENGTH:
         file_extension = safe_name.split('.')[-1]
-        if len(file_extension) + 1 < 20:
-            truncated_name = safe_name[:20 - len(file_extension) - 1]
+        if len(file_extension) + 1 < MAX_FILENAME_LENGTH:
+            truncated_name = safe_name[:MAX_FILENAME_LENGTH - len(file_extension) - 1]
             safe_name = truncated_name + '.' + file_extension
         else:
-            safe_name = safe_name[:20]
+            safe_name = safe_name[:MAX_FILENAME_LENGTH]
     return safe_name
