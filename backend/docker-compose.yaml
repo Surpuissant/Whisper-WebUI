@@ -12,7 +12,6 @@ services:
       # The DB file is saved in /Whisper-WebUI/backend/records.db unless you edit it in /Whisper-WebUI/backend/configs/.env
       - /Whisper-WebUI/models
       - /Whisper-WebUI/outputs
-      - /Whisper-WebUI/backend
 
     ports:
       - "8000:8000"
