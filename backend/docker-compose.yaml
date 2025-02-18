@@ -10,9 +10,9 @@ services:
       # Models will be stored in the `./models' directory on your machine.
       # Similarly, all output files will be stored in the `./outputs` directory.
       # The DB file is saved in /Whisper-WebUI/backend/records.db unless you edit it in /Whisper-WebUI/backend/configs/.env
-      - ../models:/Whisper-WebUI/models
-      - ../outputs:/Whisper-WebUI/outputs
-      - ../backend:/Whisper-WebUI/backend
+      - /Whisper-WebUI/models
+      - /Whisper-WebUI/outputs
+      - /Whisper-WebUI/backend
 
     ports:
       - "8000:8000"
